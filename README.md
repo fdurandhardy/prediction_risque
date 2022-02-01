@@ -18,3 +18,7 @@ Pour un soucis de confidentialité, la base de données n'est pas partagée. Le 
 Les deux modèles que nous avons entrainés sont : la Random Forest et la régression logistique pénalisée.
 Nous avons ensuite comparés les résultats obtenus et choisi le modèle optimal.
 
+# Auteurs
+* DURAND-HARDY François
+* JOBARD Rémi
+* POUSSIER Quentin
