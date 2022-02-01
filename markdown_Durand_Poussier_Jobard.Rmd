@@ -1,0 +1,648 @@
+---
+title: "Projet de Machine Learning"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(mice)
+library(VIM)
+library(lattice)
+library(caret)
+library(corrplot)
+library(dplyr)
+library(descr)
+library(glmnet)
+library(randomForest)
+library(tidyr)
+library(plotROC)
+library(pROC)
+```
+# Traitement des données
+```{r, warning=FALSE}
+setwd("C:/Users/Francois/Desktop/Au cas ou/Université/M2/machine learning/projet/donnees")
+data<-read.csv("Base_train.csv")
+```
+Toutes les variables étant *numeric*, il est nécessaire de mettre au bon format les variables qualitatives.
+```{r}
+#on passe target en facteur
+data$target<- as.factor(data$target)
+
+# Mise en forme (categorical data)
+c_names = colnames(data)
+list_num = c()
+#On sépare les nom par leur "_"
+#Si il sont en 4 parties: par exemple "ps" "ind" "02" "cat"
+#Si leur 4ème partie est égale à "cat" ou à "bin"
+# Alors, on les passe en facteur
+#Et, si ils terminent que par "cat" 
+#Alors on écrit le print
+for (j in 3:length(c_names)){
+  suf = strsplit(c_names[j],"_")
+  if (length(suf[[1]])>3){
+    if (suf[[1]][4] == "cat" | suf[[1]][4] == "bin"){
+      data[,j] = as.factor(data[,j])
+    }
+    if (suf[[1]][4] == "cat"){
+      print(paste("Colonne ",j,", de nom ",c_names[j],", nb categories = ",length(unique(data[,j])),sep=""))
+    }
+  } else {list_num = c(list_num,j)}
+}
+```
+## Les valeurs manquantes
+Nous avons commencé par afficher les données manquantes de notre base de donnée d'apprentissage.
+```{r,echo = TRUE}
+na=c()
+for (i in colnames(data)) {
+  if (sum(is.na(data[,i])== TRUE)>0) { 
+    na=table(print(paste(i,(sum(is.na(data[,i]))/length(data[,i])*100))))
+  }
+}
+```
+### Suppression des variables possedant trop de valeurs manquantes
+3 variables nous posent principalement problème : ps_reg_03, ps_car_03_cat et ps_car_05_cat car leur proportion de donnée manquante est trop importante. Avant de pouvoir les supprimer, nous avons vérifié si elles ne contenaient pas trop d'information.
+
+Nous avons commencé par la variable ps_reg_03 (18% de NA)
+```{r}
+#On cherche une variable qui explique ps_reg_03 pour la supprimer
+
+#Création data numérique 
+data_num=
+  data %>%
+  select(-ends_with("bin"),-ends_with("cat")) %>%
+  na.omit()
+
+#Correlation
+corr<-cor(data_num[3:28])
+corrplot(corr, method = "circle", type = "full", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+
+<br>
+On remarque ici que ps_reg_02 est très correlée à ps_reg_03. Elle pourra donc être supprimée.
+
+Nous pouvons maintenant passer à la variable ps_car_05_cat (45% de NA)
+On va effectuer un khi² entre les variables catégorielles pour espérer trouver une variable dépendante
+```{r}
+#Création data catégorielle
+data_cat=
+  data %>%
+  select(ends_with("cat"))
+
+#calcul des p.values pour le test du khi²
+for (i in colnames(data_cat)) {
+  if(i != "ps_car_05_cat") {
+    test=chisq.test(data_cat[,i],y=data_cat$ps_car_05_cat)
+    print(paste(i,test$p.value))
+  }
+}
+#on remarque des 0 qui sont dus à une approximation du logiciel.
+```
+
+La variable ps_car_05_cat semble être dépendante (au sens du khi²) de toutes les autres variables catégorielles. Nous pouvons donc nous permettre de la supprimer car l'information qu'elle contient est présente dans toutes les autres variables.
+
+Nous pouvons finalement nous occuper de la dernière variable ps_car_03_cat qui a la proportion de NA la plus importante (70%) 
+```{r}
+#calcul des p.values pour le test du khi²
+for (i in colnames(data_cat)) {
+  if(i != "ps_car_03_cat") {
+    test=chisq.test(data_cat[,i],y=data_cat$ps_car_03_cat)
+    print(paste(i,test$p.value))
+  }
+}
+```
+
+De même que pour la variable précédente, la variable ps_car_03_cat semble avoir un lien statistique avec toutes les autres variables catégorielles, nous pouvons donc nous permettre de la supprimer.
+
+```{r}
+data = 
+  data %>%
+  select(-c(ps_reg_03,ps_car_03_cat,ps_car_05_cat))
+```
+### Imputation sur les variables avec des NA restantes
+Comme nous ne voulions pas perdre trop d'information en supprimant les lignes qui avaient des NA, nous avons décidé d'imputer les variables restantes.
+
+Avant de les imputer, nous avons étudié le schéma de distribution des valeurs manquantes afin d'imputer par la meilleur approche possible.
+```{r, fig.height= 10, fig.width=15, warning=FALSE}
+distribution_NA = aggr(data, col=mdc(1:2),
+                       numbers=TRUE, sortVars=TRUE,
+                       labels=names(data), cex.axis=.7, 
+                       gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+```
+La répartition des données manquantes semble aléatoire, nous avons donc procéder à une imputation par arbre en utilisant la méthode CART du package mice.
+
+**ATTENTION** : Le code dans le chunk suivant a mis 7h. Si vous voulez le lancer, prévoyez des activités annexes.
+```{r, eval = FALSE}
+# mice_imputed = mice(data,meth='cart',m=1)
+# Imputed_data=complete(mice_imputed,1)
+# 
+# #A présent, on enregistre cette nouvelle base sans plus attendre
+# write.table(data,file="data.csv",sep=",")
+```
+*remarque :* la base test a été imputée de façon identique avec les mêmes variables supprimées.
+
+Récupération de la base imputée
+```{r, warning=FALSE}
+setwd("C:/Users/Francois/Desktop/Au cas ou/Université/M2/machine learning/projet/donnees")
+data<-read.csv("data_sans_na.csv")
+
+c_names=colnames(data)
+for (j in 3:length(c_names)){
+  suf = strsplit(c_names[j],"_")
+  if (length(suf[[1]])>3){
+    if (suf[[1]][4] == "cat" | suf[[1]][4] == "bin"){
+      data[,j] = as.factor(data[,j])
+    }
+}}
+
+
+#on passe target en facteur
+data$target<- as.factor(data$target)
+```
+
+## Modification des catégories
+Nous allons maintenant procéder à la modification des catégories de nos variables qualitatives car des catégories avec trop peu d'observations ou qui sont trop nombreuses poseront problèmes.
+Elles ont été modifié conditionnellement à la variable d'intérêt donc ici *target*.
+
+### Les variables sans traitement particulier
+```{r}
+#La fonction suivante évalue le taux cible pour chaque catégorie de la variable en argument
+cat_condition = function(nom_variable){
+  data %>%
+    select("target",nom_variable) %>%
+    rename("target" = "target","categories" = nom_variable) %>% #on renome car dplyr fonctionne mal avec les chaines de caractere qui sont dans des fonctions
+    group_by(target,categories) %>%
+    count() %>%
+    ungroup() %>%
+    transmute(target,categories,
+              pourcentage = n/sum(n)*100) %>%
+    spread(key = target,
+           value = pourcentage,
+           fill = 0) %>% #on aligne les pourcentages par categorie
+    mutate(total = `0` + `1`,
+           taux_cible = `1`/total*100) %>% #on calcul le taux cible
+    select(-c(`0`,`1`)) %>% 
+    arrange(categories) %>%
+    return()
+}
+
+#ps_ind_02_cat
+freq(data$ps_ind_02_cat,main = "ps_ind_02_cat")
+cat_condition("ps_ind_02_cat")
+
+levels(data$ps_ind_02_cat) = c("1","2","1","2")
+#groupe 1 : 0 2
+#groupe 2 : 1 3
+
+#ps_ind_04_cat
+freq(data$ps_ind_04_cat,main = "ps_ind_04_cat")
+
+#ps_ind_05_cat
+freq(data$ps_ind_05_cat,main = "ps_ind_05_cat")
+cat_condition("ps_ind_05_cat")
+
+levels(data$ps_ind_05_cat) = c("0","1","1","1","1","1","1") #soit de la categorie 0 soit autre (la 0 a le plus petit tx cible)
+
+
+#ps_car_01_cat
+freq(data$ps_car_01_cat,main = "ps_car_01_cat")
+cat_condition("ps_car_01_cat")
+levels(data$ps_car_01_cat) = c("0","0","0","1","1","1","2","2","1","0","1","1") 
+#groupe 0 : 0 1 2 9
+#groupe 1 : 3 4 5 8 10 11
+#groupe 2 : 6 7
+
+#ps_car_02_cat
+freq(data$ps_car_02_cat,main = "ps_car_02_cat")
+
+#ps_car_04_cat
+freq(data$ps_car_04_cat,main = "ps_car_04_cat")
+cat_condition("ps_car_04_cat")
+levels(data$ps_car_04_cat) = c("0","1","1","1","0","1","1","1","1","1")
+#groupe 0 : 0 4 
+#groupe 1 : 1 2 3 5 6 7 8 9
+
+#ps_car_07_cat
+freq(data$ps_car_07_cat,main = "ps_car_07_cat")
+cat_condition("ps_car_07_cat")
+
+#ps_car_08_cat
+freq(data$ps_car_08_cat,main = "ps_car_08_cat")
+cat_condition("ps_car_08_cat")
+
+#ps_car_09_cat
+freq(data$ps_car_09_cat,main = "ps_car_09_cat")
+cat_condition("ps_car_09_cat")
+levels(data$ps_car_09_cat) = c("0","1","0","0","1")
+#groupe 0 : 0 2 3
+#groupe 1 : 1 4
+
+#ps_car_10_cat
+freq(data$ps_car_10_cat,main = "ps_car_10_cat") #on peut supprimer cette variable
+data = data %>%
+  select(-ps_car_10_cat)
+```
+### Impact encoding
+Reste ensuite la dernière variable ps_car_11_cat qui avait 104 catégories. Nous avons utilisé la méthode d'impact encoding pour celle-ci car l'ajustement visuel (comme nous l'avons fait jusqu'à maintenant) n'était pas possible sur 104 catégories.
+```{r}
+#Pour la varibale avec 104 catégories
+freq(data$ps_car_11_cat,main = "ps_car_11_cat")
+x=c(data$ps_car_11_cat)
+y=c(data$target)
+
+var_104 = data.frame(x,y)
+
+#calcul de l'impact sur chaque catégorie
+for (cat in levels(data$ps_car_11_cat)){
+  impact=c((tapply(var_104$y,var_104$x,mean)-mean(y)))
+}
+
+cat_ordonne=order(impact,decreasing=FALSE)
+
+level=c(rep("18",104))
+
+base= data.frame(cat_ordonne = cat_ordonne,
+                 level = level)
+
+#Ne pas mettre la 103 et la 104
+#Soit la 8 et la 81
+base$cat_ordonne<-as.numeric(base$cat_ordonne)
+base$level<-as.numeric(base$level)
+for (valeur in base$cat_ordonne ) {
+  for (cat in base$cat_ordonne[1:10]){
+    base$level[1:10]<-0
+  }
+  for (cat in base$cat_ordonne[11:20]){
+    base$level[11:20]<-1
+  }
+  for (cat in base$cat_ordonne[21:30]){
+    base$level[21:30]<-2
+  }
+  for (cat in base$cat_ordonne[31:40]){
+    base$level[31:40]<-3
+  }
+  for (cat in base$cat_ordonne[41:50]){
+    base$level[41:50]<-4
+  }
+  for (cat in base$cat_ordonne[51:60]){
+    base$level[51:60]<-5
+  }
+  for (cat in base$cat_ordonne[61:70]){
+    base$level[61:70]<-6
+  }
+  for (cat in base$cat_ordonne[71:80]){
+    base$level[71:80]<-7
+  }
+  for (cat in base$cat_ordonne[81:90]){
+    base$level[81:90]<-8
+  }
+  for (cat in base$cat_ordonne[91:100]){
+    base$level[91:100]<-9
+  }
+  for (cat in base$cat_ordonne[101:104]){
+    base$level[101:104]<-10
+  }
+  base$level[8]=11
+  base$level[81]=12
+}
+
+
+match_classe = base[base$cat_ordonne %in% as.numeric(levels(data$ps_car_11_cat)),"level"]
+levels(data$ps_car_11_cat) = match_classe
+freq(data$ps_car_11_cat)
+#Certaines catégories sont constitutées de moins de 5% des observations, nous devons donc réunir certaines c
+cat_condition("ps_car_11_cat")
+levels(data$ps_car_11_cat) = c("0","11","1","2","3","4","5","6","7","11","8","9","11")
+
+summary(data$ps_car_11_cat)
+```
+
+## Le sous-echantillonnage
+Les catégories sont maintenant optimales. Nous pouvons passer à la suite : le sous-echantillonnage, étape indispensable car données déséquilibrées.
+
+```{r}
+target_1 = data$id[data$target == 1]
+nbre_obs = length(target_1)
+target_0 = sample(data$id[data$target == 0],nbre_obs,replace = FALSE)
+
+sous_ech = 
+  data %>%
+  filter(id %in% c(target_0,target_1))
+#les donnees sont bien mélangées
+
+nrow(sous_ech[sous_ech$target == 1,])/nrow(sous_ech[sous_ech$target == 0,]) #verification de la distribution 50/50
+
+sous_ech_train = sample(sous_ech$id,0.9*as.integer(length(sous_ech$id)))
+sous_ech_test = sous_ech$id[!(sous_ech$id %in% sous_ech_train)]
+
+sous_ech_train = sous_ech[sous_ech$id %in% sous_ech_train,]
+sous_ech_test = sous_ech[sous_ech$id %in% sous_ech_test,]
+```
+
+Maintenant que nos données sont prêtes, nous pouvons passer à l'étape de modélisation.
+
+# Modélisation de la variable cible
+## Régression logistique pénalisée
+
+Pour déterminer le lambda optimal, nous avons procédé par validation croisée.
+
+### Validation croisée
+```{r}
+logittraincv<-cv.glmnet(data.matrix(sous_ech_train[,3:55]),sous_ech_train[,2],family="binomial",type.measure="auc") #effectue une validation croisee
+summary(logittraincv)
+
+logittraincv$lambda.min
+logittraincv$lambda.1se ##dans un lasso on privilégie la parcimonie du modèle
+plot(logittraincv) 
+#trait pointillé de droite est le lambda 1se l'autre est le min et la valeur du lambda doit être prise entre ces deux 
+#pour le lasso on prend le 1se
+
+coef(logittraincv)
+```
+### prevision sur modele train
+```{r}
+prevLogittrain<-predict(logittraincv,newx=data.matrix(sous_ech_test[,3:55]),type="response")
+prevclassLogittrain<-predict(logittraincv,newx=data.matrix(sous_ech_test[,3:55]),type="class")
+
+prevLogittrain=prevLogittrain > 0.5 #comme nous travaillons sur le sous-echantillon, le cut-off est à 0.5
+
+prevLogittrain<-as.numeric(prevLogittrain) #on transforme les TRUE FALSE en 1 0 pour pouvoir comparer
+```
+### erreur de classification
+```{r,warning = FALSE}
+prev.classLogittrain<-data.frame(lasso=as.character(prevclassLogittrain),obs=as.character(sous_ech_test$target))
+head(prev.classLogittrain)
+
+
+prev.classLogittrain %>% 
+  summarise_all(funs(err=mean(obs!=.))) %>% 
+  select(-obs_err) %>% 
+  round(3)
+```
+
+### Courbe ROC
+```{r,warning = FALSE}
+prev.problogittrain<-data.frame(target=prevLogittrain)
+
+deux<-data.frame(target=as.numeric(as.character(sous_ech_test$target)))
+roc.logit<-roc(deux$target,predictor=prev.problogittrain$target)
+
+plot(roc.logit,print.auc=TRUE,main = "Logit")
+```
+
+## Random Forest
+Nous allons maintenant passer à la modélisation par l'algorithme Random Forest.
+Il y a de nombreux paramètres dans cet algorithme qui ont un impact sur le modèle. En voici une liste exhaustive :
+Le nombre d'arbre qui constituent la forêt (*ntree*)
+Le nombre de variable qui constituent chaque arbre (*mtry*)
+Le nombre de feuille maximal dans chaque arbre (*maxnode*)
+Le nombre d'observations maximum dans chaque feuille (*nodesize*)
+La proportion à partir de laquelle l'arbre sortira True ou False (*cutoff*)
+
+L'algorithme Random Forest repose sur la variance : plus les arbres qui constituent la forêt seront différents, plus l'aggrégation sera performante. Nous voulons donc des arbres avec la plus grande variance possible c'est-à-dire des arbres profonds. C'est pourquoi nous avons choisi le paramètre *maxnode* le plus élevé possible dans notre algorithme (*maxnode* = 50). De même, le nombre de feuille dans chaque noeud doit être le plus bas possible (*nodesize* = 100). Le nombre d'arbre dans la forêt doit aussi être le plus grand possible c'est pourquoi nous l'avons poussé à *ntree* = 1000. Ici, la seule barrière est le temps de calcul qui augmente proportionnelement avec l'optimisation de ces paramètres.
+
+Reste alors les deux derniers paramètres, les plus importants. Comme nous travaillons sur un sous-échantillon et qu'il y a autant de target = 1 que de target = 0 nous avons initialiser *cutoff* à 0.5,0.5. Ce qui veut dire que le noeud terminal de chaque arbre déterminera les individus à la majorité. Le modifier engendrerait un biais dans notre forêt.
+
+Pour ce qui est du nombre de variable sélectionnée dans chaque arbre, nous avons utilisé plusieurs méthode différentes afin d'avoir la variable la plus adaptée à notre base de donnée. Afin d'éviter du sur-apprentissage, nous avons entrainé les différentes forêts sur un sous-echantillon du sous-echantillon initial et nous les avons comparé ensuite sur un sous-echantillon test. La plus performante sur le sous-échantillon test sera celle qui sera sélectionnée.
+
+
+
+```{r}
+data = sous_ech_train
+```
+
+### Validation croisée
+Notre première méthode pour choisir le mtry optimal a été par validation croisée. Nous avons travaillé sur 5 blocs et essayé 5 valeurs possibles. Celle qui minimisera le taux d'erreur sera retenue.
+**ATTENTION** boucle longue
+```{r}
+n<- nrow(data)
+K<- 5
+taille <- n%/%K
+set.seed(1)
+alea <- runif(n)
+rang <- rank(alea)
+bloc <- (rang-1) %/% taille +1
+bloc <- as.factor(bloc)
+
+
+sum(data$target == 1) / length(data$target)
+test.mtry = c(3,6,9,12,15) #valeurs mtry possibles
+all.err <- data.frame(mtry = as.double(),
+                      err = as.double(),
+                      bloc = as.integer(),
+                      stringsAsFactors=FALSE) 
+
+#Validation croisée pour déterminer le mtry optimal
+for (k in 1:K) {
+  x<-data[bloc!=k,3:55]
+  y<-data[bloc!=k,2]
+  for (i in 1:length(test.mtry)){
+    print(paste("bloc",k,": mtry",test.mtry[i]))
+    forettrain<- randomForest(x=x,y=y,
+                              mtry = test.mtry[i],
+                              ntree = 1000,
+                              maxnode = 20,
+                              nodesize = 100,
+                              cutoff = c(0.5, 0.5))
+    pred <- predict(forettrain,newdata=data[bloc==k,3:55],type="class")
+    pred = as.numeric(as.character(pred)) == 1
+  #matrice de confusion
+  mc<- table(data$target[bloc==k],pred)
+  #taux d'erreur
+  err<- (mc[2,1] + mc[1,2])/length(pred) #taux d'exactitude
+  intermediaire = data.frame(mtry = test.mtry[i],
+                             err = err,
+                             bloc = k)
+  all.err = rbind(all.err,intermediaire)
+  }
+}
+
+#exportation de la table pour ne pas avoir à la charger à chaque fois
+write.table(all.err,file="rf_err.csv",sep=",")
+```
+
+```{r}
+#Importation de la table
+all.err = read.csv(file="rf_err.csv",sep=",")
+all.err %>%
+  group_by(mtry) %>%
+  summarise(mean(err))
+
+mtry_croix = 
+  all.err %>%
+  group_by(mtry) %>%
+  summarise(mean(err)) %>%
+  filter(`mean(err)` == min(`mean(err)`)) %>%
+  select(mtry)
+mtry_croix = mtry_croix$mtry
+```
+
+### tuneRF
+La seconde méthode utilise le taux d'erreur Out-Of-Bag défini par Brieman. Nous avons initialisé un mtry à 6 (il est conseillé dans la littérature de prendre la racine carrée du nombre de variable total). L'algorithme teste ensuite des mtry voisins du mtry initial (soit le double soit la moitié) et si l'erreur diminue (à hauteur de 1% dans notre cas) il recommence.
+```{r}
+mtry_opti = tuneRF(x=data[,3:55],y=data[,2],
+                   mtryStart = 6, #sqrt(53)
+                   cutoff = c(0.5,0.5),
+                   maxnode = 50,
+                   nodesize = 100,
+                   ntree = 1000,
+                   improve = 0.01)
+mtry_tuneRF = mtry_opti[,"mtry"][mtry_opti[,"OOBError"] == min(mtry_opti[,"OOBError"])]
+```
+
+### Brieman
+Enfin, dans l'article présenté par Brieman en 2001, si de nombreuses variables sont qualitatives, il est conseillé d'intialiser le mtry à int(log(2*M + 1)) avec M le nombre de variable total.
+```{r}
+mtry_brieman = round(log(2*(length(colnames(data)) - 2) + 1))
+```
+
+### Comparaison des modèles
+Maintenant que nous avons déterminé 3 mtry potentiels, nous allons déterminer lequel est le plus performant sur le sous-echantillon test.
+```{r}
+forettrain_tuneRF<- randomForest(x=data[,3:55],y=data[,2],
+                                 mtry = mtry_tuneRF,
+                                 ntree = 1000,
+                                 maxnode = 50,
+                                 nodesize = 100,
+                                 cutoff = c(0.5, 0.5))
+
+forettrain_tuneRF_test = predict(forettrain_tuneRF,newdata = sous_ech_test[,3:55],type = "class")
+
+forettrain_brieman = randomForest(x=data[,3:55],y=data[,2],
+                                 mtry = mtry_brieman,
+                                 ntree = 1000,
+                                 maxnode = 50,
+                                 nodesize = 100,
+                                 cutoff = c(0.5, 0.5))
+
+forettrain_brieman_test = predict(forettrain_brieman,newdata = sous_ech_test[,3:55],type = "class")
+
+forettrain_croix = randomForest(x=data[,3:55],y=data[,2],
+                                 mtry = mtry_croix,
+                                 ntree = 1000,
+                                 maxnode = 50,
+                                 nodesize = 100,
+                                 cutoff = c(0.5, 0.5))
+
+forettrain_croix_test = predict(forettrain_croix,newdata = sous_ech_test[,3:55],type = "class")
+```
+### Courbe ROC
+```{r}
+roc_brieman<-data.frame(target=as.numeric(as.character(forettrain_brieman_test)))
+roc_croix<-data.frame(target=as.numeric(as.character(forettrain_croix_test)))
+roc_tuneRF<-data.frame(target=as.numeric(as.character(forettrain_tuneRF_test)))
+
+vrai<-data.frame(target=as.numeric(as.character(sous_ech_test$target)))
+
+courbe_brieman <-roc(vrai$target,predictor=roc_brieman$target)
+courbe_croix <-roc(vrai$target,predictor=roc_croix$target)
+courbe_tuneRF <-roc(vrai$target,predictor=roc_tuneRF$target)
+
+
+plot(courbe_brieman,print.auc=TRUE,main = "brieman")
+plot(courbe_croix,print.auc=TRUE,col = "red",main = "validation croisée")
+plot(courbe_tuneRF,print.auc=TRUE,col = "green",main = "tuneRF")
+```
+
+
+D'après la courbe AUC, nous voyons que le nombre de mtry optimal est le nombre conseillé par Brieman soit mtry = 5.
+```{r}
+foret_opti = forettrain_brieman
+```
+
+# Comparaison des modèles
+## Préparation de la base test
+Nous allons effectuer sur la base test les mêmes modifications que nous avons réalisées sur la base d'apprentissage.
+```{r,warning = FALSE}
+#l'imputation de la base test, nous avons utilisé exactement les mêmes paramètres que pour la base d'apprentissage.
+setwd("C:/Users/Francois/Desktop/Au cas ou/Université/M2/machine learning/projet/donnees")
+data_test<-read.csv("test_sans_na.csv")
+data_test$target<- as.factor(data_test$target)
+
+####○n repasse donc data_test dans la boucle de traitement des catégories
+
+c_names=colnames(data_test)
+for (j in 3:length(c_names)){
+  suf = strsplit(c_names[j],"_")
+  if (length(suf[[1]])>3){
+    if (suf[[1]][4] == "cat" | suf[[1]][4] == "bin"){
+      data_test[,j] = as.factor(data_test[,j])
+    }
+}}
+
+#ps_ind_02_cat
+levels(data_test$ps_ind_02_cat) = c("1","2","1","2")
+
+
+#ps_ind_05_cat
+levels(data_test$ps_ind_05_cat) = c("0","1","1","1","1","1","1")
+
+
+#ps_car_01_cat
+levels(data_test$ps_car_01_cat) = c("0","0","0","1","1","1","2","2","1","0","1","1") 
+
+
+#ps_car_04_cat
+levels(data_test$ps_car_04_cat) = c("0","1","1","1","0","1","1","1","1","1")
+
+#ps_car_09_cat
+levels(data_test$ps_car_09_cat) = c("0","1","0","0","1")
+
+#ps_car_10_cat
+data_test = data_test %>%
+  select(-ps_car_10_cat)
+
+#Pour la varibale avec 104 categories ps_car_11_cat
+
+
+match_classe_test = base[base$cat_ordonne %in% as.numeric(levels(data_test$ps_car_11_cat)),"level"]
+levels(data_test$ps_car_11_cat) = match_classe_test
+#certaines catégories ne sont pas à 5%
+levels(data_test$ps_car_11_cat) = c("0","11","1","2","3","4","5","6","7","11","8","9","11")
+```
+
+## Performance des modèles retenus sur la base test
+###prévision des modèles sur test
+```{r}
+#logit
+prevLogit<-predict(logittraincv,newx=data.matrix(data_test[,3:55]),type="class")
+confusion_logit = table(data_test$target,prevLogit)
+
+#random forest
+prevforest<-predict(foret_opti,newdata=data_test[,3:55],type="class")
+confusion_forest = table(data_test$target,prevforest)
+```
+
+###courbe ROC
+```{r}
+vrai<-as.numeric(as.character(data_test$target))
+#logit
+roc.logit<-roc(vrai,predictor=as.numeric(prevLogit[,1]))
+plot(roc.logit,print.auc=TRUE,main = "Logit")
+
+#random forest
+roc.forest<-roc(vrai,predictor=as.numeric(as.character(prevforest)))
+plot(roc.forest,print.auc=TRUE,main = "Random Forest")
+```
+
+###Taux de mauvaise classification
+```{r}
+#Taux de mauvaise classification = (FP + FN)/N
+N = length(data_test$target)
+#logit
+(classification_logit = (confusion_logit[2,1] + confusion_logit[1,2])/N)
+#random forest
+(classification_forest = (confusion_forest[2,1] + confusion_forest[1,2])/N)
+```
+
+###Taux de rappel
+```{r}
+#rappel = VP/(VP+FN)
+#logit
+(rappel_logit<-confusion_logit[2,2]/(confusion_logit[2,2]+confusion_logit[2,1]))
+
+#random forest
+(rappel_forest<-confusion_forest[2,2]/(confusion_forest[2,2]+confusion_forest[2,1]))
+```
+
